@@ -80,6 +80,14 @@ class AdminAndAnalyticsTests(unittest.TestCase):
     def test_login_failure_page_includes_a_clear_error(self):
         self.assertIn("Incorrect username, password, or MFA code.", app.login_page("Incorrect username, password, or MFA code."))
 
+    def test_four_character_password_is_accepted(self):
+        self.assertIsInstance(app.create_admin("tiny", "pass"), int)
+
+    def test_configuration_page_is_separate_from_dashboard(self):
+        self.assertIn("Configuration", app.CONFIG_PAGE)
+        self.assertNotIn("Search & correlation", app.CONFIG_PAGE)
+        self.assertIn('href="/config"', app.PAGE)
+
 
 if __name__ == "__main__":
     unittest.main()

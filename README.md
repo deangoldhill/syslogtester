@@ -9,7 +9,7 @@ A lightweight, self-contained syslog collector and operational dashboard. It per
 ```bash
 cd syslogtester
 cp .env.example .env
-# Set a unique SYSLOG_ADMIN_PASSWORD (12+ characters).
+# Set a unique SYSLOG_ADMIN_PASSWORD (4+ characters).
 docker compose up -d --build
 ```
 
