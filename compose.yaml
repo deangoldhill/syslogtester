@@ -4,8 +4,8 @@ services:
     container_name: syslog-webui
     restart: unless-stopped
     ports:
-      # Dashboard only listens on host loopback. Terminate TLS in a local reverse proxy/VPN.
-      - "127.0.0.1:${WEB_PORT:-8085}:8085/tcp"
+      # Dashboard: host WEB_PORT (8085 by default) -> container port 8085.
+      - "${WEB_PORT:-8085}:8085/tcp"
       # Static syslog forwarding currently enabled for standard UDP syslog.
       - "514:514/udp"
     environment:

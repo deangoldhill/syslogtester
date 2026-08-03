@@ -4,7 +4,7 @@ A lightweight, self-contained syslog collector and operational dashboard. It per
 
 ## Deploy
 
-> The dashboard is published only on host loopback port **8085**; place a TLS-terminating reverse proxy or VPN in front of it before use. Standard syslog UDP maps from host port **514**. Docker port mappings are static: expose any listener added in the UI by adding a matching mapping to `compose.yaml`, then recreate the service.
+> The dashboard is forwarded on host port **8085** by default and standard syslog UDP maps from host port **514**. Docker port mappings are static: expose any listener added in the UI by adding a matching mapping to `compose.yaml`, then recreate the service.
 
 ```bash
 cd syslogtester
@@ -13,7 +13,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Open the dashboard through its HTTPS endpoint (for example `https://<dashboard-host>`) and sign in as `SYSLOG_ADMIN_USERNAME` (default `admin`) with the first-run password. Configure your TLS reverse proxy to forward to `http://127.0.0.1:8085`; do not expose that upstream port to the network. Once that administrator has been stored in the database, use **Administration** in the UI to create additional accounts. The bootstrap password is not consulted after an administrator exists: remove `SYSLOG_ADMIN_PASSWORD` from `.env` after first boot, then recreate the container.
+Open the dashboard through its HTTPS endpoint (for example `https://<dashboard-host>`) and sign in as `SYSLOG_ADMIN_USERNAME` (default `admin`) with the first-run password. If the dashboard is reachable outside a trusted network, put a TLS reverse proxy in front of it and restrict direct access to port 8085 with your firewall. Once that administrator has been stored in the database, use **Administration** in the UI to create additional accounts. The bootstrap password is not consulted after an administrator exists: remove `SYSLOG_ADMIN_PASSWORD` from `.env` after first boot, then recreate the container.
 
 ## Administration and MFA
 
@@ -67,7 +67,7 @@ Each extracted field appears as a button; select one to correlate every record s
 
 ## Operational notes
 
-- **Firewall:** allow UDP/514 plus only any additional explicitly-mapped listener ports. Do **not** open TCP/8085: it is loopback-only for the TLS proxy.
+- **Firewall:** allow TCP/8085 and UDP/514 only from trusted networks, plus any additional explicitly-mapped listener ports. Use HTTPS through a reverse proxy for untrusted-network access.
 - **Additional listeners:** UI listener creation starts it inside the container. To receive network traffic, add a matching mapping such as `- "5514:5514/tcp"` or `- "5514:5514/udp"` to `compose.yaml`, then run `docker compose up -d --build`.
 - **Privileged ports:** the container runs as root only so it can bind standard syslog port 514. It has `no-new-privileges` enabled and uses no third-party Python packages.
 - **Protocol framing:** UDP datagrams are stored individually. TCP input is newline-delimited and limited to 64 KiB per buffered frame by default (`MAX_TCP_MESSAGE_BYTES`); clients exceeding it are disconnected. RFC6587 octet-counted framing is not implemented.
