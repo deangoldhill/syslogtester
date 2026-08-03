@@ -88,6 +88,19 @@ class AdminAndAnalyticsTests(unittest.TestCase):
         self.assertNotIn("Search & correlation", app.CONFIG_PAGE)
         self.assertIn('href="/config"', app.PAGE)
 
+    def test_db_context_manager_closes_connections(self):
+        with app.db() as con:
+            con.execute("SELECT 1")
+        with self.assertRaises(Exception):
+            con.execute("SELECT 1")
+
+    def test_tabs_logout_and_per_admin_mfa_controls_are_rendered(self):
+        self.assertIn('class="tabs"', app.PAGE)
+        self.assertIn('action="/logout"', app.PAGE)
+        self.assertIn('class="tabs"', app.CONFIG_PAGE)
+        self.assertIn('enrolMfa(${v.id})', app.CONFIG_PAGE)
+        self.assertIn("'/api/admins/'+id+'/totp'", app.CONFIG_PAGE)
+
 
 if __name__ == "__main__":
     unittest.main()
