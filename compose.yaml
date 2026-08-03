@@ -3,12 +3,15 @@ services:
     build: .
     container_name: syslog-webui
     restart: unless-stopped
-    # Required for dynamic listeners: ports added in the UI bind directly to the
-    # Linux Docker host. Docker's normal `ports:` mappings are fixed at startup.
-    network_mode: host
+    ports:
+      # Dashboard: host WEB_PORT (8085 by default) -> container port 8085.
+      - "${WEB_PORT:-8085}:8085/tcp"
+      # Static syslog forwarding currently enabled for standard UDP syslog.
+      - "514:514/udp"
     environment:
       SYSLOG_UI_TOKEN: ${SYSLOG_UI_TOKEN:?Set SYSLOG_UI_TOKEN in .env}
-      WEB_PORT: ${WEB_PORT:-8085}
+      # Keep the application on a stable internal port; WEB_PORT controls its host mapping.
+      WEB_PORT: 8085
     volumes:
       - ./data:/data
     security_opt:

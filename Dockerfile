@@ -7,5 +7,6 @@ COPY app.py /app/app.py
 # but no shell or package manager is needed at runtime.
 ENV DATA_DIR=/data WEB_HOST=0.0.0.0 WEB_PORT=8085 PYTHONUNBUFFERED=1
 VOLUME ["/data"]
-EXPOSE 8085
+EXPOSE 8085/tcp
+EXPOSE 514/udp
 ENTRYPOINT ["python3", "/app/app.py"]
