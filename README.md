@@ -1,19 +1,38 @@
-# Syslog Web UI
+# Syslog Command Center
 
-A lightweight, self-contained syslog collector with a web dashboard. It stores all received records in a persistent SQLite database and lets an authenticated administrator add/remove **TCP and UDP listeners** at runtime.
+A lightweight, self-contained syslog collector and operational dashboard. It persists received records in SQLite, parses RFC5424/RFC3164 and indexed `key=value` payload fields, and manages TCP/UDP listeners at runtime.
 
 ## Deploy
 
-> The dashboard is forwarded to host port **8085** by default and standard syslog UDP is forwarded from host port **514** to the container. Docker port mappings are static: to expose any additional listener added in the UI, add its TCP/UDP mapping to `compose.yaml` and run `docker compose up -d --build` again.
+> The dashboard is published only on host loopback port **8085**; place a TLS-terminating reverse proxy or VPN in front of it before use. Standard syslog UDP maps from host port **514**. Docker port mappings are static: expose any listener added in the UI by adding a matching mapping to `compose.yaml`, then recreate the service.
 
 ```bash
 cd syslogtester
 cp .env.example .env
-# Edit .env and replace SYSLOG_UI_TOKEN with: openssl rand -hex 32
+# Set a unique SYSLOG_ADMIN_PASSWORD (12+ characters).
 docker compose up -d --build
 ```
 
-Open `http://<docker-host>:8085`, sign in with `SYSLOG_UI_TOKEN`, then add a **UDP listener on port 514**. Docker already forwards host UDP/514 to the container. The dashboard is on `WEB_PORT` (8085 by default).
+Open the dashboard through its HTTPS endpoint (for example `https://<dashboard-host>`) and sign in as `SYSLOG_ADMIN_USERNAME` (default `admin`) with the first-run password. Configure your TLS reverse proxy to forward to `http://127.0.0.1:8085`; do not expose that upstream port to the network. Once that administrator has been stored in the database, use **Administration** in the UI to create additional accounts. The bootstrap password is not consulted after an administrator exists: remove `SYSLOG_ADMIN_PASSWORD` from `.env` after first boot, then recreate the container.
+
+## Administration and MFA
+
+- Every administrator has a username and a password stored with PBKDF2-SHA256, a per-password random salt, and 600,000 iterations. Plaintext passwords are never stored.
+- Any signed-in administrator can add further administrator accounts from **Administration**.
+- An administrator can enrol their own TOTP MFA in the same screen. The interface shows the base32 secret and asks for a valid six-digit code before MFA becomes active. The `otpauth://` URI returned by the API is compatible with standard authenticator apps.
+- Sessions are server-side, randomly generated, HTTP-only, **Secure**, SameSite=Strict cookies with an eight-hour lifetime. Login attempts are rate-limited per source IP (eight failures per 15 minutes).
+- Serve the dashboard over **HTTPS** (for example through a TLS-terminating reverse proxy or a VPN); secure session cookies intentionally do not work over plain HTTP.
+
+## Live telemetry
+
+The command-center dashboard refreshes every five seconds and shows:
+
+- total messages received and the current messages-per-minute rate;
+- distinct hosts and source IPs;
+- the highest-volume hosts;
+- a compact, rolling 60-minute ingest-rate graph.
+
+The authenticated API exposes the same data from `GET /api/dashboard` for other dashboards or alerting integrations.
 
 ## Send a test message
 
@@ -33,9 +52,9 @@ Messages persist in `./data/syslog.db`. Back up that file only while the contain
 
 ## Indexed search and correlation
 
-The collector recognises RFC5424 fields—including version, event timestamp, host, app, process ID, and message ID—and extracts `key=value` pairs from the application message into indexed SQLite rows. Existing records are automatically reparsed and indexed on the first startup after upgrading.
+The collector recognises RFC5424 metadata—including version, event timestamp, host, app, process ID, and message ID—and extracts `key=value` pairs from the application message into indexed SQLite rows. Existing records are automatically reparsed and indexed on upgrade.
 
-Use the dashboard search box for ordinary free-text search or field filters. Filters are combined with **AND** and quoted values preserve spaces:
+Use the search box for ordinary free-text search or field filters. Filters are combined with **AND** and quoted values preserve spaces:
 
 ```text
 username:carapad
@@ -44,16 +63,15 @@ event:AUDIT action:"Login completed"
 app:radiusstack-authlog nasipaddress:192.168.42.118
 ```
 
-Each extracted field is shown as a button in the result table. Click one to search/correlate every record sharing that field value—for example, all activity for a username, calling-station MAC, NAS address, admin account, or source IP.
+Each extracted field appears as a button; select one to correlate every record sharing that field value—for example activity for a username, calling-station MAC, NAS address, administrator account, or source IP.
 
 ## Operational notes
 
-- **Firewall:** allow TCP/8085 and UDP/514 (plus only the additional ports you explicitly add to `compose.yaml`). The application binds listeners to `0.0.0.0` inside the container.
-- **Additional listeners:** Adding a listener in the UI starts it inside the container. For traffic to reach it from the network, add a matching mapping under `ports:` in `compose.yaml`—for example `- "5514:5514/tcp"` or `- "5514:5514/udp"`—then recreate with `docker compose up -d --build`.
-- **Privileged ports:** the container runs as root only to allow standard syslog port 514. It has `no-new-privileges` enabled and uses no third-party Python packages.
-- **Authentication:** set a long random `SYSLOG_UI_TOKEN`; the UI/API is inaccessible without it. Put the dashboard behind a reverse proxy/VPN if it is reachable from untrusted networks.
-- **Protocol framing:** UDP datagrams are stored individually. TCP input is newline-delimited, which is the common simple syslog TCP framing; RFC6587 octet-counted framing is not implemented.
-- **API:** `GET /healthz` is unauthenticated for health checks. Authenticated endpoints are `GET/POST /api/listeners`, `DELETE /api/listeners/<id>`, and `GET /api/messages?q=&limit=`.
+- **Firewall:** allow UDP/514 plus only any additional explicitly-mapped listener ports. Do **not** open TCP/8085: it is loopback-only for the TLS proxy.
+- **Additional listeners:** UI listener creation starts it inside the container. To receive network traffic, add a matching mapping such as `- "5514:5514/tcp"` or `- "5514:5514/udp"` to `compose.yaml`, then run `docker compose up -d --build`.
+- **Privileged ports:** the container runs as root only so it can bind standard syslog port 514. It has `no-new-privileges` enabled and uses no third-party Python packages.
+- **Protocol framing:** UDP datagrams are stored individually. TCP input is newline-delimited and limited to 64 KiB per buffered frame by default (`MAX_TCP_MESSAGE_BYTES`); clients exceeding it are disconnected. RFC6587 octet-counted framing is not implemented.
+- **API:** `GET /healthz` is unauthenticated. Authenticated endpoints include listener management, message search, `GET /api/dashboard`, `GET/POST /api/admins`, and the self-service MFA endpoints.
 
 ## Lifecycle
 

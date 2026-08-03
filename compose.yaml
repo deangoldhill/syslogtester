@@ -4,12 +4,14 @@ services:
     container_name: syslog-webui
     restart: unless-stopped
     ports:
-      # Dashboard: host WEB_PORT (8085 by default) -> container port 8085.
-      - "${WEB_PORT:-8085}:8085/tcp"
+      # Dashboard only listens on host loopback. Terminate TLS in a local reverse proxy/VPN.
+      - "127.0.0.1:${WEB_PORT:-8085}:8085/tcp"
       # Static syslog forwarding currently enabled for standard UDP syslog.
       - "514:514/udp"
     environment:
-      SYSLOG_UI_TOKEN: ${SYSLOG_UI_TOKEN:?Set SYSLOG_UI_TOKEN in .env}
+      SYSLOG_ADMIN_USERNAME: ${SYSLOG_ADMIN_USERNAME:-admin}
+      # Required only for first startup; remove it after the initial admin is stored.
+      SYSLOG_ADMIN_PASSWORD: ${SYSLOG_ADMIN_PASSWORD:-}
       # Keep the application on a stable internal port; WEB_PORT controls its host mapping.
       WEB_PORT: 8085
     volumes:
