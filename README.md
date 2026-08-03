@@ -31,6 +31,21 @@ printf '<13>Aug  3 12:00:00 testhost demo: hello over TCP\n' | nc <docker-host> 
 
 Messages persist in `./data/syslog.db`. Back up that file only while the container is stopped, or use SQLite's `.backup` command for a consistent live backup.
 
+## Indexed search and correlation
+
+The collector recognises RFC5424 fields—including version, event timestamp, host, app, process ID, and message ID—and extracts `key=value` pairs from the application message into indexed SQLite rows. Existing records are automatically reparsed and indexed on the first startup after upgrading.
+
+Use the dashboard search box for ordinary free-text search or field filters. Filters are combined with **AND** and quoted values preserve spaces:
+
+```text
+username:carapad
+username:carapad reply:Access-Accept
+event:AUDIT action:"Login completed"
+app:radiusstack-authlog nasipaddress:192.168.42.118
+```
+
+Each extracted field is shown as a button in the result table. Click one to search/correlate every record sharing that field value—for example, all activity for a username, calling-station MAC, NAS address, admin account, or source IP.
+
 ## Operational notes
 
 - **Firewall:** allow TCP/8085 and UDP/514 (plus only the additional ports you explicitly add to `compose.yaml`). The application binds listeners to `0.0.0.0` inside the container.
