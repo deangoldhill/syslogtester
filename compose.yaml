@@ -1,0 +1,15 @@
+services:
+  syslog-webui:
+    build: .
+    container_name: syslog-webui
+    restart: unless-stopped
+    # Required for dynamic listeners: ports added in the UI bind directly to the
+    # Linux Docker host. Docker's normal `ports:` mappings are fixed at startup.
+    network_mode: host
+    environment:
+      SYSLOG_UI_TOKEN: ${SYSLOG_UI_TOKEN:?Set SYSLOG_UI_TOKEN in .env}
+      WEB_PORT: ${WEB_PORT:-8080}
+    volumes:
+      - ./data:/data
+    security_opt:
+      - no-new-privileges:true
