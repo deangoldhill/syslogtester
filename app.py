@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
 import re
@@ -25,6 +26,7 @@ MAX_TCP_MESSAGE_BYTES = max(1024, int(os.environ.get("MAX_TCP_MESSAGE_BYTES", "6
 BOOTSTRAP_ADMIN = os.environ.get("SYSLOG_ADMIN_USERNAME", "admin")
 BOOTSTRAP_PASSWORD = os.environ.get("SYSLOG_ADMIN_PASSWORD", "")
 COOKIE_NAME = "syslog_ui_auth"
+COOKIE_SECURE = os.environ.get("SYSLOG_COOKIE_SECURE", "false").strip().lower() in {"1", "true", "yes", "on"}
 workers = {}
 workers_lock = threading.Lock()
 sessions = {}
@@ -351,6 +353,9 @@ def create_session(admin):
         sessions[token] = {"admin": public_admin(admin), "expires": time.time() + 8 * 3600}
     return token
 
+def session_cookie(token, secure=COOKIE_SECURE):
+    return f'{COOKIE_NAME}={token}; HttpOnly' + ('; Secure' if secure else '') + '; SameSite=Strict; Path=/; Max-Age=28800'
+
 def clear_session(handler):
     cookie = SimpleCookie(handler.headers.get("Cookie")); value = cookie.get(COOKIE_NAME)
     if value:
@@ -447,14 +452,18 @@ async function messages(){let f=new FormData(document.querySelector('#filter')),
 function clearSearch(){document.querySelector('[name=q]').value='';messages()} async function removeListener(id){if(confirm('Stop and delete this listener?')){await api('/api/listeners/'+id,{method:'DELETE'});await listeners()}}
 document.querySelector('#add').onsubmit=async e=>{e.preventDefault();try{await api('/api/listeners',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});e.target.reset();await listeners()}catch(e){alert(e.message)}};document.querySelector('#add-admin').onsubmit=async e=>{e.preventDefault();try{await api('/api/admins',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});e.target.reset();await admins()}catch(e){alert(e.message)}};document.querySelector('#filter').onsubmit=e=>{e.preventDefault();messages()};listeners();admins();telemetry();messages();setInterval(()=>{messages();telemetry()},5000);
 </script></body></html>'''
-LOGIN = '''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Syslog Command Center — Sign in</title><style>body{font-family:system-ui;background:#101827;color:#e5e7eb;display:grid;place-items:center;height:80vh}form{background:#1f2937;padding:28px;border-radius:12px;min-width:280px}input,button{box-sizing:border-box;width:100%;display:block;padding:10px;margin:10px 0;background:#111827;color:white;border:1px solid #4b5563;border-radius:6px}button{background:#2563eb;border:0}.muted{color:#9ca3af;font-size:13px}</style><form method="post" action="/login"><h1>Syslog Command Center</h1><p class="muted">Sign in with your administrator account.</p><input name="username" autocomplete="username" placeholder="Username" autofocus required><input name="password" type="password" autocomplete="current-password" placeholder="Password" required><input name="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="MFA code (if enabled)"><button>Sign in</button></form>'''
+LOGIN = '''<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Syslog Command Center — Sign in</title><style>body{font-family:system-ui;background:#101827;color:#e5e7eb;display:grid;place-items:center;height:80vh}form{background:#1f2937;padding:28px;border-radius:12px;min-width:280px}input,button{box-sizing:border-box;width:100%;display:block;padding:10px;margin:10px 0;background:#111827;color:white;border:1px solid #4b5563;border-radius:6px}button{background:#2563eb;border:0}.muted{color:#9ca3af;font-size:13px}</style><form method="post" action="/login"><h1>Syslog Command Center</h1><p class="muted">Sign in with your administrator account.</p><!-- LOGIN_ERROR --><input name="username" autocomplete="username" placeholder="Username" autofocus required><input name="password" type="password" autocomplete="current-password" placeholder="Password" required><input name="totp" inputmode="numeric" autocomplete="one-time-code" placeholder="MFA code (if enabled)"><button>Sign in</button></form>'''
+
+def login_page(error=""):
+    notice = f'<p role="alert" style="color:#fca5a5">{html.escape(error)}</p>' if error else ''
+    return LOGIN.replace('<!-- LOGIN_ERROR -->', notice)
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): print("web", self.address_string(), fmt % args)
     def require_auth(self):
         if authenticated(self): return True
         if self.path.startswith('/api/'): json_response(self, {"error": "unauthorized"}, 401)
-        else: html_response(self, LOGIN, 401)
+        else: html_response(self, login_page(), 401)
         return False
     def do_GET(self):
         path = urlparse(self.path)
@@ -482,9 +491,9 @@ class Handler(BaseHTTPRequestHandler):
             admin = authenticate_admin(form.get('username', [''])[0], form.get('password', [''])[0], form.get('totp', [''])[0])
             if admin:
                 token = create_session(admin)
-                self.send_response(302); self.send_header('Set-Cookie', f'{COOKIE_NAME}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800'); self.send_header('Location', '/'); self.end_headers()
+                self.send_response(302); self.send_header('Set-Cookie', session_cookie(token)); self.send_header('Location', '/'); self.end_headers()
             else:
-                record_failed_login(self); html_response(self, LOGIN, 401)
+                record_failed_login(self); html_response(self, login_page('Incorrect username, password, or MFA code.'), 401)
             return
         if not self.require_auth(): return
         if path.path == '/api/admins':

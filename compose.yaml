@@ -14,6 +14,8 @@ services:
       SYSLOG_ADMIN_PASSWORD: ${SYSLOG_ADMIN_PASSWORD:-}
       # Keep the application on a stable internal port; WEB_PORT controls its host mapping.
       WEB_PORT: 8085
+      # Set true when the browser reaches the dashboard over HTTPS via a reverse proxy.
+      SYSLOG_COOKIE_SECURE: ${SYSLOG_COOKIE_SECURE:-false}
     volumes:
       - ./data:/data
     security_opt:

@@ -73,6 +73,13 @@ class AdminAndAnalyticsTests(unittest.TestCase):
         self.assertIn(keep, app.sessions)
         self.assertNotIn(other, app.sessions)
 
+    def test_direct_http_cookie_omits_secure_attribute_but_https_cookie_includes_it(self):
+        self.assertNotIn("; Secure", app.session_cookie("token", secure=False))
+        self.assertIn("; Secure", app.session_cookie("token", secure=True))
+
+    def test_login_failure_page_includes_a_clear_error(self):
+        self.assertIn("Incorrect username, password, or MFA code.", app.login_page("Incorrect username, password, or MFA code."))
+
 
 if __name__ == "__main__":
     unittest.main()

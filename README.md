@@ -20,8 +20,8 @@ Open the dashboard through its HTTPS endpoint (for example `https://<dashboard-h
 - Every administrator has a username and a password stored with PBKDF2-SHA256, a per-password random salt, and 600,000 iterations. Plaintext passwords are never stored.
 - Any signed-in administrator can add further administrator accounts from **Administration**.
 - An administrator can enrol their own TOTP MFA in the same screen. The interface shows the base32 secret and asks for a valid six-digit code before MFA becomes active. The `otpauth://` URI returned by the API is compatible with standard authenticator apps.
-- Sessions are server-side, randomly generated, HTTP-only, **Secure**, SameSite=Strict cookies with an eight-hour lifetime. Login attempts are rate-limited per source IP (eight failures per 15 minutes).
-- Serve the dashboard over **HTTPS** (for example through a TLS-terminating reverse proxy or a VPN); secure session cookies intentionally do not work over plain HTTP.
+- Sessions are server-side, randomly generated, HTTP-only, SameSite=Strict cookies with an eight-hour lifetime. Set `SYSLOG_COOKIE_SECURE=true` whenever browsers access the dashboard over HTTPS; leave it `false` only for direct HTTP on a trusted LAN. Login attempts are rate-limited per source IP (eight failures per 15 minutes).
+- For access outside a trusted LAN, serve the dashboard over **HTTPS** (for example through a TLS-terminating reverse proxy or a VPN) and set `SYSLOG_COOKIE_SECURE=true`.
 
 ## Live telemetry
 
