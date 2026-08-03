@@ -13,7 +13,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Open `http://<docker-host>:8080`, sign in with `SYSLOG_UI_TOKEN`, then add listeners such as UDP/514 and TCP/514. The dashboard is on `WEB_PORT` (8080 by default).
+Open `http://<docker-host>:8085`, sign in with `SYSLOG_UI_TOKEN`, then add listeners such as UDP/514 and TCP/514. The dashboard is on `WEB_PORT` (8085 by default).
 
 ## Send a test message
 

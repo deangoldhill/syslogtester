@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, urlparse
 DATA_DIR = os.environ.get("DATA_DIR", "/data")
 DB_PATH = os.path.join(DATA_DIR, "syslog.db")
 WEB_HOST = os.environ.get("WEB_HOST", "0.0.0.0")
-WEB_PORT = int(os.environ.get("WEB_PORT", "8080"))
+WEB_PORT = int(os.environ.get("WEB_PORT", "8085"))
 TOKEN = os.environ.get("SYSLOG_UI_TOKEN", "")
 COOKIE_NAME = "syslog_ui_auth"
 workers = {}
