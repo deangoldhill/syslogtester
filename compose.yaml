@@ -25,6 +25,7 @@ services:
       - "514:514/udp"
     environment:
       WEB_PORT: "8085"
+      TZ: ${TZ:-Europe/London}
       DATABASE_URL: postgresql://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}
       SYSLOG_ADMIN_USER: ${SYSLOG_ADMIN_USER:-dean}
     depends_on:
