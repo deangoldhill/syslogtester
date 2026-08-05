@@ -1,22 +1,63 @@
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - syslog-postgres:/var/lib/postgresql/data
+    networks:
+      - syslog-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # PostgreSQL entrypoint initializes its owned data volume and requires its normal privilege transition.
+
   syslog-webui:
     build: .
-    container_name: syslog-webui
     restart: unless-stopped
+    # Only syslog ingest is published; the browser app is reachable solely through Traefik.
     ports:
-      # Dashboard: host WEB_PORT (8085 by default) -> container port 8085.
-      - "${WEB_PORT:-8085}:8085/tcp"
-      # Static syslog forwarding currently enabled for standard UDP syslog.
       - "514:514/udp"
     environment:
-      SYSLOG_ADMIN_USERNAME: ${SYSLOG_ADMIN_USERNAME:-admin}
-      # Required only for first startup; remove it after the initial admin is stored.
-      SYSLOG_ADMIN_PASSWORD: ${SYSLOG_ADMIN_PASSWORD:-}
-      # Keep the application on a stable internal port; WEB_PORT controls its host mapping.
-      WEB_PORT: 8085
-      # Set true when the browser reaches the dashboard over HTTPS via a reverse proxy.
-      SYSLOG_COOKIE_SECURE: ${SYSLOG_COOKIE_SECURE:-false}
-    volumes:
-      - ./data:/data
+      WEB_PORT: "8085"
+      DATABASE_URL: postgresql://${POSTGRES_USER:?set POSTGRES_USER in .env}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB in .env}
+      SYSLOG_ADMIN_USER: ${SYSLOG_ADMIN_USER:-dean}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - traefik
+      - syslog-internal
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: ${TRAEFIK_NETWORK:-proxy}
+      traefik.http.routers.syslog.rule: Host(`${SYSLOG_HOST:-syslog.deanscloud.com}`)
+      traefik.http.routers.syslog.entrypoints: websecure
+      traefik.http.routers.syslog.tls: "true"
+      # Existing file-provider ForwardAuth forwards Authelia's verified Remote-User identity.
+      traefik.http.routers.syslog.middlewares: authelia@file
+      traefik.http.services.syslog.loadbalancer.server.port: "8085"
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    read_only: true
+    tmpfs:
+      - /tmp
+
+volumes:
+  syslog-postgres:
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-proxy}
+  syslog-internal:
+    internal: true

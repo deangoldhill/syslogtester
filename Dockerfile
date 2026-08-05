@@ -2,11 +2,14 @@ FROM python:3.13-alpine
 
 WORKDIR /app
 COPY app.py /app/app.py
+COPY migrate_sqlite.py /app/migrate_sqlite.py
+COPY migrations /app/migrations
+RUN pip install --no-cache-dir "psycopg[binary]>=3.2" \
+    && chmod -R a+rX /app \
+    && addgroup -S syslog && adduser -S -G syslog -u 10001 syslog
 
-# A non-root user cannot bind standard syslog port 514. The container runs as root,
-# but no shell or package manager is needed at runtime.
-ENV DATA_DIR=/data WEB_HOST=0.0.0.0 WEB_PORT=8085 PYTHONUNBUFFERED=1
-VOLUME ["/data"]
+ENV WEB_HOST=0.0.0.0 WEB_PORT=8085 PYTHONUNBUFFERED=1
 EXPOSE 8085/tcp
 EXPOSE 514/udp
+USER syslog
 ENTRYPOINT ["python3", "/app/app.py"]
