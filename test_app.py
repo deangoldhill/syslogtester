@@ -48,6 +48,13 @@ class PostgreSqlAndAdminTests(unittest.TestCase):
         self.assertEqual(fields["destination_zone"], "WAN")
         self.assertEqual(fields["action"], "allow")
 
+    def test_insights_page_and_api_expose_operational_explorer_capabilities(self):
+        self.assertIn("Investigation Workspace", app.INSIGHTS_PAGE)
+        self.assertIn("/api/insights", app.INSIGHTS_PAGE)
+        self.assertIn("Last 24 hours", app.INSIGHTS_PAGE)
+        self.assertIn("severity", app.insight_query_spec()["facets"])
+        self.assertIn("application", app.insight_query_spec()["facets"])
+
     def test_compose_has_no_browser_or_database_port_published(self):
         with open(os.path.join(os.path.dirname(__file__), "compose.yaml"), encoding="utf-8") as compose_file:
             compose = compose_file.read()
