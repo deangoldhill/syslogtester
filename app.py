@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """PostgreSQL-backed syslog collector and Traefik/Authelia-protected dashboard."""
+import csv
 import html
 import json
 import os
@@ -11,6 +12,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import StringIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -81,6 +83,33 @@ def purge_expired(con):
     return con.execute("DELETE FROM messages WHERE received_at < CURRENT_TIMESTAMP - (%s * INTERVAL '1 day')", (days,)).rowcount
 
 
+def parse_palo_alto_fields(message):
+    """Extract stable, high-value fields from PAN-OS CSV Traffic/Threat logs."""
+    try:
+        values = next(csv.reader(StringIO(message), strict=True))
+    except (csv.Error, StopIteration):
+        return {}
+    offset = 1 if len(values) > 3 and values[0].isdigit() and values[3] in {"TRAFFIC", "THREAT", "CONFIG", "SYSTEM", "GLOBALPROTECT", "HIPMATCH", "USERID"} else 0
+    if len(values) < 36 + offset or values[2 + offset] not in {"TRAFFIC", "THREAT", "CONFIG", "SYSTEM", "GLOBALPROTECT", "HIPMATCH", "USERID"}:
+        return {}
+    field = lambda index: values[index + offset]
+    fields = {
+        "vendor": "paloalto", "pan_log_type": field(2).lower(), "pan_subtype": field(3).lower(),
+        "pan_serial": field(1), "pan_generated_time": field(5), "src_ip": field(6), "dst_ip": field(7),
+        "nat_src_ip": field(8), "nat_dst_ip": field(9), "rule": field(10), "source_user": field(11),
+        "destination_user": field(12), "application": field(13), "vsys": field(14),
+        "source_zone": field(15), "destination_zone": field(16), "ingress_interface": field(17),
+        "egress_interface": field(18), "log_profile": field(19), "session_id": field(21),
+        "source_port": field(23), "destination_port": field(24), "nat_source_port": field(25),
+        "nat_destination_port": field(26), "protocol": field(28), "action": field(29),
+    }
+    if field(2) == "TRAFFIC":
+        fields.update({"bytes": field(30), "bytes_sent": field(31), "bytes_received": field(32), "packets": field(33), "session_start": field(34), "elapsed_seconds": field(35)})
+    if field(2) == "THREAT":
+        fields.update({"threat_name": field(30), "threat_id": field(31), "category": field(32), "severity": field(33)})
+    return {key: value for key, value in fields.items() if value and value.lower() not in {"n/a", "any", "none"}}
+
+
 def parse_fields(message):
     fields = {}
     for match in KV_RE.finditer(message):
@@ -134,6 +163,8 @@ def parse_syslog(raw):
         else:
             parsed["message"] = body
     parsed["fields"] = parse_fields(parsed["message"])
+    palo_payload = (parsed["app_name"] + " " + parsed["message"]) if parsed["app_name"] and re.match(r"^\d+,\d{4}/\d{2}/\d{2}", parsed["app_name"]) else parsed["message"]
+    parsed["fields"].update(parse_palo_alto_fields(palo_payload))
     return parsed
 
 
@@ -147,7 +178,22 @@ def store(listener_id, addr, payload):
             VALUES(CURRENT_TIMESTAMP,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (listener_id, addr[0], addr[1], parsed["facility"], parsed["severity"], parsed["hostname"], parsed["app_name"], parsed["message"], raw, parsed["event_time"], parsed["syslog_version"], parsed["process_id"], parsed["event_type"])).fetchone()
         if parsed["fields"]:
-            con.executemany("INSERT INTO message_fields(message_id,field_name,field_value) VALUES(%s,%s,%s)", [(row["id"], key, value) for key, value in parsed["fields"].items()])
+            with con.cursor() as cursor:
+                cursor.executemany("INSERT INTO message_fields(message_id,field_name,field_value) VALUES(%s,%s,%s)", [(row["id"], key, value) for key, value in parsed["fields"].items()])
+
+
+def reindex_palo_alto_messages():
+    """Backfill structured fields for legacy PAN-OS records without touching other fields."""
+    with db() as con:
+        rows = list(con.execute("SELECT id, app_name, message FROM messages WHERE source_ip='192.168.4.4'::inet OR hostname='PANFW.deanscloud.com'"))
+        entries = []
+        for row in rows:
+            payload = (row["app_name"] + " " + row["message"]) if row["app_name"] and re.match(r"^\d+,\d{4}/\d{2}/\d{2}", row["app_name"]) else row["message"]
+            entries.extend((row["id"], key, value) for key, value in parse_palo_alto_fields(payload).items())
+        if entries:
+            with con.cursor() as cursor:
+                cursor.executemany("INSERT INTO message_fields(message_id,field_name,field_value) VALUES(%s,%s,%s) ON CONFLICT(message_id,field_name) DO UPDATE SET field_value=EXCLUDED.field_value", entries)
+        return len(entries)
 
 
 def udp_listener(listener_id, port, stop):
@@ -345,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     apply_migrations()
+    indexed = reindex_palo_alto_messages()
+    if indexed: print(f"Indexed {indexed} Palo Alto fields")
     with db() as con:
         purge_expired(con)
         saved = list(con.execute("SELECT * FROM listeners WHERE enabled"))
