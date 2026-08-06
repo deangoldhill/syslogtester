@@ -29,6 +29,12 @@ workers = {}
 workers_lock = threading.Lock()
 
 KV_RE = re.compile(r'''(?P<key>[A-Za-z_][A-Za-z0-9_.-]*)=(?:"(?P<quoted>(?:\\.|[^"\\])*)"|(?P<bare>[^\s]+))''')
+FIELD_NAME_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+MAX_RULE_NAME_LENGTH = 80
+MAX_MATCH_LITERAL_LENGTH = 120
+MAX_RULE_FIELDS = 32
+MAX_FIELD_VALUE_LENGTH = 1024
+DELIMITERS = {"comma": ",", "pipe": "|", "tab": "\t", ",": ",", "|": "|", "\t": "\t"}
 
 
 @contextmanager
@@ -110,6 +116,56 @@ def parse_palo_alto_fields(message):
     return {key: value for key, value in fields.items() if value and value.lower() not in {"n/a", "any", "none"}}
 
 
+def built_in_parsing_rules():
+    """Describe fixed parsers without exposing executable parser configuration."""
+    return [{"id": "key-value", "name": "Key=value fields", "kind": "built-in", "description": "Extracts bounded key=value tokens."},
+            {"id": "pan-os-csv", "name": "PAN-OS CSV", "kind": "built-in", "description": "Normalizes PAN-OS Traffic and Threat CSV logs."}]
+
+
+def validate_user_defined_rule(data):
+    """Validate the deliberately small, non-executable user parsing-rule language."""
+    name = str(data.get("name", "")).strip()
+    literal = str(data.get("match_literal", ""))
+    delimiter = DELIMITERS.get(str(data.get("delimiter", "")).lower())
+    raw_names = data.get("field_names", "")
+    names = [part.strip().lower() for part in raw_names.split(",")] if isinstance(raw_names, str) else list(raw_names)
+    if not 1 <= len(name) <= MAX_RULE_NAME_LENGTH:
+        raise ValueError(f"Rule name must be 1-{MAX_RULE_NAME_LENGTH} characters")
+    if not literal or len(literal) > MAX_MATCH_LITERAL_LENGTH:
+        raise ValueError(f"Match literal must be 1-{MAX_MATCH_LITERAL_LENGTH} characters")
+    if delimiter is None:
+        raise ValueError("Delimiter must be comma, pipe, or tab")
+    if not 1 <= len(names) <= MAX_RULE_FIELDS or len(set(names)) != len(names):
+        raise ValueError(f"Provide 1-{MAX_RULE_FIELDS} unique field names")
+    if not all(isinstance(field, str) and FIELD_NAME_RE.fullmatch(field) for field in names):
+        raise ValueError("Field names must start with a letter and contain only lowercase letters, digits, dot, dash, or underscore")
+    return {"name": name, "match_literal": literal, "delimiter": delimiter, "field_names": names}
+
+
+def bounded_fields(fields):
+    return {str(key).lower(): str(value) for key, value in fields.items()
+            if FIELD_NAME_RE.fullmatch(str(key).lower()) and value is not None and 0 < len(str(value)) <= MAX_FIELD_VALUE_LENGTH}
+
+
+def parse_user_defined_fields(message, rules):
+    """Apply literal-prefix, delimited rules only; never evaluate user code, SQL, or regex."""
+    fields = {}
+    for rule in rules:
+        literal, delimiter, names = rule["match_literal"], rule["delimiter"], rule["field_names"]
+        if not message.startswith(literal):
+            continue
+        try:
+            values = next(csv.reader(StringIO(message), delimiter=delimiter, strict=True))
+        except (csv.Error, StopIteration):
+            continue
+        fields.update({name: value for name, value in zip(names, values)})
+    return bounded_fields(fields)
+
+
+def user_defined_rules(con):
+    return [dict(row) for row in con.execute("SELECT id,name,match_literal,delimiter,field_names,created_at FROM parsing_rules ORDER BY id")]
+
+
 def parse_fields(message):
     fields = {}
     for match in KV_RE.finditer(message):
@@ -122,10 +178,10 @@ def parse_fields(message):
             except UnicodeDecodeError:
                 pass
         fields[match.group("key").lower()] = value
-    return fields
+    return bounded_fields(fields)
 
 
-def parse_syslog(raw):
+def parse_syslog(raw, user_rules=()):
     parsed = {"facility": None, "severity": None, "hostname": None, "app_name": None,
               "process_id": None, "event_type": None, "event_time": None,
               "syslog_version": None, "message": raw, "fields": {}}
@@ -164,7 +220,9 @@ def parse_syslog(raw):
             parsed["message"] = body
     parsed["fields"] = parse_fields(parsed["message"])
     palo_payload = (parsed["app_name"] + " " + parsed["message"]) if parsed["app_name"] and re.match(r"^\d+,\d{4}/\d{2}/\d{2}", parsed["app_name"]) else parsed["message"]
-    parsed["fields"].update(parse_palo_alto_fields(palo_payload))
+    parsed["fields"].update(bounded_fields(parse_palo_alto_fields(palo_payload)))
+    parsed["fields"].update(parse_user_defined_fields(parsed["message"], user_rules))
+    parsed["fields"] = bounded_fields(parsed["fields"])
     return parsed
 
 
@@ -172,8 +230,8 @@ def store(listener_id, addr, payload):
     raw = payload.decode("utf-8", errors="replace").rstrip("\r\n\x00")
     if not raw:
         return
-    parsed = parse_syslog(raw)
     with db() as con:
+        parsed = parse_syslog(raw, user_defined_rules(con))
         row = con.execute("""INSERT INTO messages(received_at,listener_id,source_ip,source_port,facility,severity,hostname,app_name,message,raw,event_time,syslog_version,process_id,event_type)
             VALUES(CURRENT_TIMESTAMP,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
             (listener_id, addr[0], addr[1], parsed["facility"], parsed["severity"], parsed["hostname"], parsed["app_name"], parsed["message"], raw, parsed["event_time"], parsed["syslog_version"], parsed["process_id"], parsed["event_type"])).fetchone()
@@ -346,6 +404,29 @@ def activity_insights(hours):
 INSIGHTS_PAGE = '''<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Investigation Workspace</title><style>:root{color-scheme:dark;--bg:#07111f;--card:#0d1b2d;--line:#213551;--text:#e9f2ff;--muted:#9ab0ca;--accent:#55d6be;--alert:#fb7185}*{box-sizing:border-box}body{margin:0;background:linear-gradient(135deg,#07111f,#0c1830);color:var(--text);font:14px system-ui}.shell{max-width:1500px;margin:auto;padding:24px}.top{display:flex;justify-content:space-between;align-items:center;gap:15px;flex-wrap:wrap}.eyebrow{color:var(--accent);font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase}h1{margin:4px 0;font-size:28px}a,button,select{font:inherit}a{color:var(--accent)}select,button{border-radius:8px;border:1px solid var(--line);padding:9px 12px;background:#0a1526;color:var(--text)}button{background:var(--accent);color:#06111d;font-weight:800;cursor:pointer}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(175px,1fr));gap:12px;margin:20px 0}.card,.panel{background:rgba(13,27,45,.94);border:1px solid var(--line);border-radius:14px;padding:16px}.value{font-size:30px;font-weight:800;color:var(--accent)}.danger{color:var(--alert)}.layout{display:grid;grid-template-columns:1.35fr 1fr;gap:14px}.facets{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.bar{display:grid;grid-template-columns:110px 1fr 38px;gap:8px;align-items:center;margin:7px 0}.track{height:8px;background:#12233b;border-radius:10px}.fill{height:8px;background:linear-gradient(90deg,#55d6be,#67a8ff);border-radius:10px}table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top;word-break:break-word}pre{white-space:pre-wrap;margin:0;color:#bdcde4}.muted{color:var(--muted)}.chart{height:150px;display:flex;align-items:end;gap:4px;padding-top:15px}.column{flex:1;min-width:6px;background:#55d6be;border-radius:4px 4px 0 0;position:relative}.column span{position:absolute;bottom:-20px;font-size:9px;color:var(--muted);white-space:nowrap}@media(max-width:850px){.shell{padding:14px}.layout{grid-template-columns:1fr}.facets{grid-template-columns:1fr}.bar{grid-template-columns:95px 1fr 32px}}</style><main class="shell"><div class="top"><div><div class="eyebrow">Syslog Command Center</div><h1>Investigation Workspace</h1><div class="muted">Operational signal, security triage, and rapid correlation</div></div><div><select id="window"><option value="1">Last hour</option><option value="6">Last 6 hours</option><option value="24" selected>Last 24 hours</option><option value="72">Last 3 days</option><option value="168">Last 7 days</option></select> <button id="refresh">Refresh</button> <a href="/">Explorer</a></div></div><div class="grid" id="summary"></div><div class="layout"><section class="panel"><h2>Event volume</h2><div id="chart" class="chart"></div></section><section class="panel"><h2>Fast facets</h2><div id="facets" class="facets"></div></section></div><section class="panel"><h2>Latest events</h2><div id="recent"></div></section></main><script>const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));async function load(){let d=await (await fetch('/api/insights?hours='+window.value,{cache:'no-store'})).json();summary.innerHTML=[['Events',d.total,''],['High / critical',d.high_or_critical,'danger'],['Window',d.hours+'h',''],['Top source',(d.facets.host[0]||{}).label||'—','']].map(x=>`<div class=card>${x[0]}<div class="value ${x[2]}">${esc(x[1])}</div></div>`).join('');let max=Math.max(1,...d.timeline.map(x=>x.count));chart.innerHTML=d.timeline.map(x=>`<div class=column style="height:${Math.max(5,x.count/max*100)}%" title="${esc(x.bucket)}: ${x.count}"><span>${esc(x.bucket)}</span></div>`).join('')||'<p class=muted>No events in this window.</p>';facets.innerHTML=Object.entries(d.facets).map(([name,rows])=>`<div class=card><b>${esc(name.replace('_',' '))}</b>${rows.map(x=>`<div class=bar><span>${esc(x.label)}</span><div class=track><div class=fill style="width:${Math.max(4,x.count/(rows[0]?.count||1)*100)}%"></div></div><span>${x.count}</span></div>`).join('')||'<p class=muted>No values</p>'}</div>`).join('');recent.innerHTML='<table><tr><th>Received</th><th>Host</th><th>Message</th><th>Fields</th></tr>'+d.recent.map(x=>`<tr><td>${esc(x.received_at)}</td><td>${esc(x.hostname||x.source_ip)}</td><td><pre>${esc(x.message)}</pre></td><td>${esc(Object.entries(x.fields||{}).slice(0,6).map(v=>v.join(':')).join(' · '))}</td></tr>`).join('')+'</table>'}refresh.onclick=load;window.onchange=load;load().catch(e=>console.error(e));</script>'''
 
 
+TAB_CSS = ".tabs{display:flex;gap:6px;margin:0 0 18px;border-bottom:1px solid #374151}.tab{padding:9px 13px;text-decoration:none;color:#cbd5e1;border-radius:8px 8px 0 0}.tab[aria-selected=true]{background:#2563eb;color:white}.tab:focus-visible{outline:3px solid #93c5fd;outline-offset:2px}@media(max-width:520px){.tabs{gap:2px}.tab{flex:1;text-align:center;padding:9px 4px;font-size:13px}}"
+
+
+def tabs(active):
+    entries = (("Dashboard", "/", "dashboard"), ("Investigate", "/insights", "investigate"), ("Admin", "/admin", "admin"))
+    return '<nav class="tabs" role="tablist" aria-label="Syslog sections">' + ''.join(
+        f'<a class="tab" role="tab" aria-selected="{str(key == active).lower()}" href="{href}">{label}</a>'
+        for label, href, key in entries) + "</nav>"
+
+
+def add_tabs(page, active):
+    page = page.replace("</style>", TAB_CSS + "</style>", 1)
+    marker = '<main class="shell">' if '<main class="shell">' in page else "<main>"
+    return page.replace(marker, marker + tabs(active), 1)
+
+
+PAGE = add_tabs(PAGE.replace('Access is enforced at Traefik/Authelia. Dean may use <a href="/admin">Syslog Admin</a> or <a href="/insights">Investigation Workspace</a>.', 'Access is enforced at Traefik/Authelia; Admin remains dean-only.'), "dashboard")
+INSIGHTS_PAGE = add_tabs(INSIGHTS_PAGE.replace('<a href="/">Explorer</a>', ''), "investigate")
+ADMIN_PAGE = ADMIN_PAGE.replace('</section><p><a href="/">Back to dashboard</a></p></main>', '</section><section><h2>Parsing Rules</h2><p class="muted">Safe literal-prefix CSV-style extraction only: no code, SQL, or regular expressions.</p><form id="rule"><input name="name" maxlength="80" required placeholder="Rule name"><input name="match_literal" maxlength="120" required placeholder="Exact prefix, e.g. ACME,"><select name="delimiter"><option value="comma">comma</option><option value="pipe">pipe</option><option value="tab">tab</option></select><input name="field_names" required placeholder="field_one, field_two (max 32)"><button>Add rule</button></form><div id="rules"></div></section></main>')
+ADMIN_PAGE = add_tabs(ADMIN_PAGE, "admin")
+ADMIN_PAGE = ADMIN_PAGE.replace('refresh()</script>', '''async function refreshRules(){let x=await api('/api/admin/parsing-rules');rules.textContent='';let table=document.createElement('table');table.innerHTML='<tr><th>Type</th><th>Name</th><th>Match / detail</th><th>Fields</th></tr>';for(const v of [...x.built_in,...x.user_defined]){let row=table.insertRow();row.insertCell().textContent=v.kind||'user-defined';row.insertCell().textContent=v.name;row.insertCell().textContent=v.match_literal||v.description;row.insertCell().textContent=Array.isArray(v.field_names)?v.field_names.join(', '):''}rules.append(table)}rule.onsubmit=async e=>{e.preventDefault();await api('/api/admin/parsing-rules',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(rule)))});rule.reset();refreshRules()};refresh();refreshRules()</script>''')
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): print("web", self.address_string(), fmt % args)
     def require_dean(self):
@@ -372,6 +453,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/insights": return json_response(self, activity_insights(parse_qs(urlparse(self.path).query).get("hours", [24])[0]))
         if path == "/api/messages":
             with db() as con: return json_response(self, message_rows(con, parse_qs(urlparse(self.path).query)))
+        if path == "/api/admin/parsing-rules":
+            if not self.require_dean(): return
+            with db() as con:
+                return json_response(self, {"built_in": built_in_parsing_rules(), "user_defined": user_defined_rules(con)})
         if path == "/api/admin/overview":
             if not self.require_dean(): return
             with db() as con:
@@ -381,7 +466,18 @@ class Handler(BaseHTTPRequestHandler):
         return json_response(self, {"error": "not found"}, 404)
     def do_POST(self):
         if not self.require_dean(): return
-        if urlparse(self.path).path != "/api/admin/listeners": return json_response(self, {"error": "not found"}, 404)
+        path = urlparse(self.path).path
+        if path == "/api/admin/parsing-rules":
+            try:
+                rule = validate_user_defined_rule(self.read_json())
+                with db() as con:
+                    row = con.execute("INSERT INTO parsing_rules(name,match_literal,delimiter,field_names) VALUES(%s,%s,%s,%s) RETURNING id,name,match_literal,delimiter,field_names,created_at", (rule["name"], rule["match_literal"], rule["delimiter"], json.dumps(rule["field_names"]))).fetchone()
+                return json_response(self, dict(row), 201)
+            except psycopg.errors.UniqueViolation:
+                return json_response(self, {"error": "A parsing rule with that name already exists"}, 409)
+            except (ValueError, json.JSONDecodeError) as exc:
+                return json_response(self, {"error": str(exc)}, 400)
+        if path != "/api/admin/listeners": return json_response(self, {"error": "not found"}, 404)
         listener_id = None
         try:
             data = self.read_json(); port = int(data.get("port")); protocol = str(data.get("protocol", "")).lower()

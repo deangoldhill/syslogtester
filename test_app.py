@@ -25,6 +25,8 @@ class PostgreSqlAndAdminTests(unittest.TestCase):
         self.assertIn("USING GIN", migration_sql)
         self.assertIn("idx_messages_received_at", migration_sql)
         self.assertIn("idx_message_fields_lookup", migration_sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS parsing_rules", migration_sql)
+        self.assertIn("jsonb_array_length(field_names) BETWEEN 1 AND 32", migration_sql)
         self.assertNotIn("AUTOINCREMENT", migration_sql.upper())
 
     def test_admin_page_is_explicitly_proxy_authenticated_and_has_only_scoped_controls(self):
@@ -54,6 +56,52 @@ class PostgreSqlAndAdminTests(unittest.TestCase):
         self.assertIn("Last 24 hours", app.INSIGHTS_PAGE)
         self.assertIn("severity", app.insight_query_spec()["facets"])
         self.assertIn("application", app.insight_query_spec()["facets"])
+
+    def test_navigation_uses_responsive_dashboard_investigate_admin_tabs(self):
+        for page in (app.PAGE, app.INSIGHTS_PAGE, app.ADMIN_PAGE):
+            self.assertIn('role="tablist"', page)
+            self.assertIn(">Dashboard<", page)
+            self.assertIn(">Investigate<", page)
+            self.assertIn(">Admin<", page)
+            self.assertIn("@media", page)
+
+    def test_built_in_rules_identify_the_existing_pan_os_csv_parser(self):
+        rules = app.built_in_parsing_rules()
+        self.assertTrue(any(rule["id"] == "pan-os-csv" for rule in rules))
+        self.assertTrue(any("PAN-OS" in rule["name"] for rule in rules))
+
+    def test_user_defined_rule_validation_is_bounded_and_does_not_accept_code_or_regex(self):
+        rule = app.validate_user_defined_rule({
+            "name": "Appliance events", "match_literal": "ACME,", "delimiter": "comma",
+            "field_names": "device_id, event_type, severity",
+        })
+        self.assertEqual(rule["delimiter"], ",")
+        self.assertEqual(rule["field_names"], ["device_id", "event_type", "severity"])
+        invalid_rules = (
+            {"name": "bad", "match_literal": "x" * 121, "delimiter": ",", "field_names": "one"},
+            {"name": "bad", "match_literal": "x", "delimiter": ";", "field_names": "one"},
+            {"name": "bad", "match_literal": "x", "delimiter": ",", "field_names": "one,(.*)"},
+            {"name": "bad", "match_literal": "x", "delimiter": ",", "field_names": ",".join(f"f{i}" for i in range(33))},
+        )
+        for invalid in invalid_rules:
+            with self.assertRaises(ValueError):
+                app.validate_user_defined_rule(invalid)
+
+    def test_user_defined_delimited_rules_extract_only_bounded_values_on_literal_match(self):
+        rules = [{"match_literal": "ACME,", "delimiter": ",", "field_names": ["device_id", "event_type", "severity"]}]
+        self.assertEqual(
+            app.parse_user_defined_fields("ACME,edge-1,login,high", rules),
+            {"device_id": "ACME", "event_type": "edge-1", "severity": "login"},
+        )
+        self.assertEqual(app.parse_user_defined_fields("OTHER,edge-1,login,high", rules), {})
+        long_value = "x" * (app.MAX_FIELD_VALUE_LENGTH + 1)
+        self.assertNotIn("event_type", app.parse_user_defined_fields(f"ACME,{long_value},high", rules))
+
+    def test_parsing_rules_are_in_admin_page_and_dean_only_api_routes(self):
+        self.assertIn("Parsing Rules", app.ADMIN_PAGE)
+        self.assertIn("/api/admin/parsing-rules", app.ADMIN_PAGE)
+        handler_source = app.Handler.do_GET.__code__.co_consts + app.Handler.do_POST.__code__.co_consts
+        self.assertIn("/api/admin/parsing-rules", handler_source)
 
     def test_compose_has_no_browser_or_database_port_published(self):
         with open(os.path.join(os.path.dirname(__file__), "compose.yaml"), encoding="utf-8") as compose_file:

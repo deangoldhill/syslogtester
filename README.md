@@ -40,7 +40,11 @@ username:carapad reply:Access-Accept
 event:AUDIT app:radiusstack-authlog
 ```
 
-`/admin` is intentionally dean-only. It exposes read-only database health/storage/message/listener statistics, and narrowly scoped listener add/remove controls. It also controls retention from 1 to 3650 days; saving retention immediately deletes messages older than that setting. No raw configuration editing or arbitrary command execution is available.
+The responsive Dashboard, Investigate, and Admin tabs replace cross-page text links. `/admin` is intentionally dean-only. It exposes read-only database health/storage/message/listener statistics, narrowly scoped listener add/remove controls, and parsing-rule APIs. It also controls retention from 1 to 3650 days; saving retention immediately deletes messages older than that setting. No raw configuration editing or arbitrary command execution is available.
+
+### Parsing rules
+
+Admin can list built-in rules (including the PAN-OS CSV parser) and add durable user-defined rules through `GET`/`POST /api/admin/parsing-rules`. User rules use a deliberately bounded model: a 1–120-character literal **prefix**, comma/pipe/tab delimiter, and 1–32 unique field names matching `[a-z][a-z0-9_.-]{0,63}`. During ingestion, only values up to 1024 characters are indexed. There is no user-supplied code, SQL, or regex evaluation. Rules are stored in PostgreSQL migration `002_parsing_rules.sql`.
 
 ## Send a test message
 
